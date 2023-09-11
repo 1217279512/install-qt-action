@@ -1,0 +1,200 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: npm
+          cache-dependency-path: action/
+
+      - run: |
+          cd action
+          npm ci || npm install
+        shell: bash
+
+      - run: |
+          cd action
+          npm run lint
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+        aqtversion:
+          - null  # use whatever the default is
+        src-doc-examples:
+          - false
+        qt:
+          - version: "5.9.0"
+            requested: "5.9.0"
+            modules: qtwebengine
+          - version: "5.15.2"
+            requested: "5.15"
+            modules: qtwebengine
+          - version: "6.3.2"  # Qt 6.3 is not an LTS version, so '6.3.*' always resolves to '6.3.2'
+            requested: "6.3.*"
+            # In Qt 6.2.0+, qtwebengine requires qtpositioning and qtwebchannel
+            modules: qtwebengine qtpositioning qtwebchannel
+          - tools-only-build: true
+        cache:
+          - cached
+          - uncached
+        include:
+          - os: ubuntu-20.04
+            src-doc-examples: true
+            source: true
+            src-archives: qtcharts
+            check-dir: ../Qt/5.15.2/Src
+            check: qtcharts/src/src.pro
+          - os: ubuntu-20.04
+            src-doc-examples: true
+            documentation: true
+            doc-archives: qmake
+            doc-modules: qtcharts qtwebengine
+            check-dir: ../Qt/Docs/Qt-5.15.2
+            check: qmake/qmake-tutorial.html qtcharts/qtcharts-index.html qtwebengine/qtwebengine-index.html
+          - os: ubuntu-20.04
+            src-doc-examples: true
+            examples: true
+            example-archives: qtsensors
+            example-modules: qtcharts qtwebengine
+            check-dir: ../Qt/Examples/Qt-5.15.2
+            check: charts/charts.pro sensors/sensors.pro webengine/webengine.pro
+          - os: ubuntu-22.04
+            aqtversion: "==3.1.*"
+            qt:
+              version: "5.15.2"
+              requested: "5.15"
+              modules: qtwebengine
+
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: npm
+          cache-dependency-path: action/
+
+      - run: |
+          cd action
+          npm ci || npm install
+        shell: bash
+
+      - run: |
+          cd action
+          npm run build
+
+      - name: Install Qt with options and default aqtversion
+        if: ${{ !matrix.aqtversion && matrix.qt.version }}
+        uses: ./
+        with:
+          modules: ${{ matrix.qt.modules }}
+          version: ${{ matrix.qt.requested }}
+          tools: tools_ifw tools_qtcreator,qt.tools.qtcreator
+          cache: ${{ matrix.cache == 'cached' }}
+
+      - name: Install Qt with options and specified aqtversion
+        if: ${{ matrix.aqtversion && matrix.qt.version }}
+        uses: ./
+        with:
+          aqtversion: ${{ matrix.aqtversion }}
+          modules: ${{ matrix.qt.modules }}
+          version: ${{ matrix.qt.requested }}
+          tools: tools_ifw tools_qtcreator,qt.tools.qtcreator
+          cache: ${{ matrix.cache == 'cached' }}
+
+      - name: Configure test project on windows
+        if: ${{ matrix.qt.version && startsWith(matrix.os, 'windows') }}
+        env:
+          QT_VERSION: ${{ matrix.qt.version }}
+        run: |
+          cd tests/TestWithModules
+          for /f "delims=" %%d in ( 'vswhere.exe -latest -property installationPath' ) do @( call "%%d\VC\Auxiliary\Build\vcvars64.bat" )
+          IF "%QT_VERSION:~0,1%"=="5" ( dir %Qt5_DIR%\lib\cmake ) ELSE ( dir %Qt6_DIR%\lib\cmake )
+          qmake
+        shell: cmd
+
+      - name: Configure test project on unix
+        if: ${{ matrix.qt.version && !startsWith(matrix.os, 'windows') }}
+        env:
+          QT_VERSION: ${{ matrix.qt.version }}
+        run: |
+          cd tests/TestWithModules
+          if [[ $QT_VERSION == 6* ]]; then
+            ls "$Qt6_DIR/lib/cmake"
+          else
+            ls "$Qt5_DIR/lib/cmake"
+          fi
+          qmake
+        shell: bash
+
+      - name: Install source
+        if: ${{ matrix.source }}
+        uses: ./
+        with:
+          version: "5.15.2"
+          source: true
+          no-qt-binaries: true
+          src-archives: ${{ matrix.src-archives }}
+
+      - name: Install docs
+        if: ${{ matrix.documentation }}
+        uses: ./
+        with:
+          version: "5.15.2"
+          documentation: true
+          no-qt-binaries: true
+          doc-archives: ${{ matrix.doc-archives }}
+          doc-modules: ${{ matrix.doc-modules }}
+
+      - name: Install examples
+        if: ${{ matrix.examples }}
+        uses: ./
+        with:
+          version: "5.15.2"
+          examples: true
+          no-qt-binaries: true
+          example-archives: ${{ matrix.example-archives }}
+          example-modules: ${{ matrix.example-modules }}
+
+      - name: Test source, docs, examples
+        if: ${{ matrix.src-doc-examples }}
+        shell: bash
+        run: |
+          cd ${{ matrix.check-dir }}
+          ls ${{ matrix.check }}
+
+      - name: Install tools with options
+        if: ${{ matrix.qt.tools-only-build }}
+        uses: ./
+        with:
+          tools-only: true
+          tools: tools_ifw tools_qtcreator,qt.tools.qtcreator
+          cache: ${{ matrix.cache == 'cached' }}
+
+      - name: Test installed tools
+        if: ${{ matrix.qt.tools-only-build }}
+        env:
+          # Conditionally set qtcreator path based on os:
+          QTCREATOR_BIN_PATH: ${{ startsWith(matrix.os, 'macos') && '../Qt/Qt Creator.app/Contents/MacOS/' || '../Qt/Tools/QtCreator/bin/' }}
+        shell: bash
+        run: |
+          # Check if QtIFW is installed
+          ls ../Qt/Tools/QtInstallerFramework/*/bin/
+          ../Qt/Tools/QtInstallerFramework/*/bin/archivegen --version
+  
+          # Check if QtCreator is installed: QtCreator includes the CLI program 'qbs' on all 3 platforms
+          ls "${QTCREATOR_BIN_PATH}"
+          "${QTCREATOR_BIN_PATH}qbs" --version
